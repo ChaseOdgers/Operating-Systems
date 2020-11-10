@@ -24,8 +24,8 @@
 #define CONSUMER_CPU   25
 #define CONSUMER_BLOCK 10
 
-#define YOU_WILL_DETERMINE_FOR_PRODUCERS 678
-#define YOU_WILL_DETERMINE_FOR_CONSUMERS 678
+#define YOU_WILL_DETERMINE_FOR_PRODUCERS 100 //change 678 values to appropriate semaphore length
+#define YOU_WILL_DETERMINE_FOR_CONSUMERS 100
 
 /*****************************************************
  *   Shared Queue Related Structures and Routines    *
@@ -34,7 +34,7 @@ typedef struct {
   // These should be protected by mutex
   int buf[QUEUESIZE];   /* Array for Queue contents, managed as circular queue */
   int head;             /* Index of the queue head */
-  int tail;             /* Index of the queue tail, the next empty slot */  
+  int tail;             /* Index of the queue tail, the next empty slot */
 
   // These two won't be used in the real solution
   int full;             /* Flag set when queue is full  */
@@ -56,17 +56,17 @@ queue *queueInit (void)
    * Allocate the structure that holds all queue information
    */
   q = (queue *)malloc (sizeof (queue));
-  if (q == NULL) 
+  if (q == NULL)
 	  return (NULL);
   /*
    * Initialize the state variables. See the definition of the Queue
    * structure for the definition of each.
    */
-  q->empty = 1;  
-  q->full  = 0;   
+  q->empty = 1;
+  q->full  = 0;
 
-  q->head  = 0;   
-  q->tail  = 0;   
+  q->head  = 0;
+  q->tail  = 0;
 
   /*
    * Allocate and initialize the queue mutex
@@ -96,7 +96,7 @@ void queueDelete (queue *q)
    */
   pthread_mutex_destroy (q->mutex);
   free (q->mutex);
-	
+
   /*
    * Destroy and deallocate the semaphores
    */
@@ -113,7 +113,7 @@ void queueDelete (queue *q)
 
 void queueAdd (queue *q, int in)
 {
-  
+
   /*
    * Put the input item into the free slot
    */
@@ -180,20 +180,20 @@ void queueRemove (queue *q, int *out)
  ******************************************************/
 /*
  * Argument struct used to pass consumers and producers thier
- * arguments.  
- * 
- * q     - arg provides a pointer to the shared queue. 
+ * arguments.
+ *
+ * q     - arg provides a pointer to the shared queue.
  *
  * count - arg is a pointer to a counter for this thread to track how
  *         much work it did.
  *
- * tid   - arg provides the ID number of the producer or consumer, 
+ * tid   - arg provides the ID number of the producer or consumer,
  *         whichis also its index into the array of thread structures.
- * 
+ *
  */
 typedef struct {
-  queue *q;       
-  int   *count;   
+  queue *q;
+  int   *count;
   int    tid;
 } pcdata;
 
@@ -242,7 +242,7 @@ void msleep(unsigned int milli_seconds)
 }
 
 /*
- * Simulate doing work. 
+ * Simulate doing work.
  */
 void do_work(int cpu_iterations, int blocking_time)
 {
@@ -256,7 +256,7 @@ void do_work(int cpu_iterations, int blocking_time)
       local_var = memory_access_area[i];
     }
   }
-  
+
   if ( blocking_time > 0 ) {
     msleep(blocking_time);
   }
@@ -282,10 +282,11 @@ void *producer (void *parg)
    */
   while (1) {
     /*
-     * Do work to produce an item. Tthe get a slot in the queue for
+     * Do work to produce an item. Then get a slot in the queue for
      * it. Finally, at the end of the loop, outside the critical
      * section, announce that we produced it.
      */
+    pthread_mutex_lock(fifo->mutex);
     do_work(PRODUCER_CPU, PRODUCER_BLOCK);
 
     /*
@@ -293,8 +294,11 @@ void *producer (void *parg)
      * produce, so wait until it is not full. Use sem_wait on the
      * appropriate semaphore from the fifo queue, for the producer.
      */
-    
-	
+     while(fifo->full && *total_inserted != WORK_MAX){
+       printf ("prod %d:  FULL.\n", my_tid);
+       sem_wait(fifo->slotsToPut);
+     }
+
 	/*
      * Check to see if the total produced by all producers has reached
      * the configured maximum, if so, we can quit. Before quitting, execute some
@@ -302,6 +306,8 @@ void *producer (void *parg)
      * that are in the waiting queue for fifo->slotsToPut and fifo->slotsToGet respectively
      */
     if (*total_inserted >= WORK_MAX) {
+      pthread_mutex_unlock(fifo->mutex);
+      sem_post(fifo->slotsToGet);
       break;
     }
 
@@ -311,14 +317,18 @@ void *producer (void *parg)
      * queue. We are accessing the shared queue fifo in this section.
      * So, we should ensure mutual exclusion.
      */
+
     item = (*total_inserted);
     queueAdd (fifo, item);
-	++(*total_inserted);
-    
+  	++(*total_inserted);
+
+    pthread_mutex_unlock(fifo->mutex);
     /*
-     * Announce the production outside the critical section 
+     * Announce the production outside the critical section
 	 * Let the consumers know that there is item in the buffer
      */
+    sem_post(fifo->slotsToPut);
+
     printf("prod %d:  %d.\n", my_tid, item);
 
   }
@@ -351,15 +361,21 @@ void *consumer (void *carg)
      * produce, so wait until it is not empty. Use sem_wait on the
      * appropriate semaphore from the fifo queue, for the consumer.
      */
-    
-	
+     pthread_mutex_lock(fifo->mutex);
+     while(fifo->empty && *total_consumed != WORK_MAX){
+       printf("con %d:  EMPTY. \n",my_tid);
+       sem_wait(fifo->slotsToGet);
+     }
+
 	/*
      * If total consumption has reached the configured limit, we can
-     * stop. Before stopping, execute some additional sem_post for the 
-     * producers and consumers to free up ones that are in the waiting 
+     * stop. Before stopping, execute some additional sem_post for the
+     * producers and consumers to free up ones that are in the waiting
      * queue for fifo->slotsToPut and fifo->slotsToGet respectively
      */
     if (*total_consumed >= WORK_MAX) {
+      pthread_mutex_unlock(fifo->mutex);
+      sem_post(fifo->slotsToGet);
       break;
     }
 
@@ -368,13 +384,13 @@ void *consumer (void *carg)
      * Remove the next item from the queue. Increment the count of the
      * total consumed. Note that item is a local copy so this
      * thread can retain a memory of which item it consumed even if
-     * others are busy consuming them. We are accessing the shared queue 
+     * others are busy consuming them. We are accessing the shared queue
      * fifo in this section. So, we should ensure mutual exclusion.
      */
     queueRemove (fifo, &item);
     (*total_consumed)++;
-
-
+    pthread_mutex_unlock(fifo->mutex);
+    sem_post(fifo->slotsToGet);
     /*
      * Do work outside the critical region to consume the item
      * obtained from the queue and then announce its consumption.
@@ -410,7 +426,7 @@ int main (int argc, char *argv[])
   pcdata    *thread_args;
 
   /*
-   * Check the number of arguments and determine the numebr of
+   * Check the number of arguments and determine the number of
    * producers and consumers
    */
   if (argc != 3) {
@@ -436,16 +452,16 @@ int main (int argc, char *argv[])
    * consumed, shared among all consumers.
    */
   procount = (int *) malloc (sizeof (int));
-  if (procount == NULL) { 
-    fprintf(stderr, "procount allocation failed\n"); 
-    exit(1); 
+  if (procount == NULL) {
+    fprintf(stderr, "procount allocation failed\n");
+    exit(1);
   }
   *procount=0;
-  
+
   concount = (int *) malloc (sizeof (int));
-  if (concount == NULL) { 
-    fprintf(stderr, "concount allocation failed\n"); 
-    exit(1); 
+  if (concount == NULL) {
+    fprintf(stderr, "concount allocation failed\n");
+    exit(1);
   }
   *concount=0;
 
@@ -454,21 +470,21 @@ int main (int argc, char *argv[])
    * consumer
    */
   pro = (pthread_t *) malloc (sizeof (pthread_t) * pros);
-  if (pro == NULL) { 
-    fprintf(stderr, "pros\n"); 
-    exit(1); 
+  if (pro == NULL) {
+    fprintf(stderr, "pros\n");
+    exit(1);
   }
 
   con = (pthread_t *) malloc (sizeof (pthread_t) * cons);
-  if (con == NULL) { 
-    fprintf(stderr, "cons\n"); 
-    exit(1); 
+  if (con == NULL) {
+    fprintf(stderr, "cons\n");
+    exit(1);
   }
 
   /*
    * Create the specified number of producers
    */
-  for (i=0; i<pros; i++){ 
+  for (i=0; i<pros; i++){
     /*
      * Allocate memory for each producer's arguments
      */
@@ -529,4 +545,3 @@ int main (int argc, char *argv[])
 
   return 0;
 }
-
